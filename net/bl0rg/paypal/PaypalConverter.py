@@ -11,6 +11,7 @@ from operator import itemgetter, attrgetter
 import time
 import commands
 import re
+import cStringIO
 
 def utf8_encoder(unicode_csv_data):
     for line in unicode_csv_data:
@@ -21,7 +22,40 @@ def unicode_csv_reader(unicode_csv_data, dialect=csv.excel, **kwargs):
     csv_reader = csv.reader(utf8_encoder(unicode_csv_data), dialect=dialect, **kwargs)
     for row in csv_reader:
         yield [unicode(cell, 'utf-8') for cell in row]
-        
+
+
+class UnicodeWriter:
+    """
+    A CSV writer which will write rows to CSV file "f",
+    which is encoded in the given encoding.
+    """
+
+    def __init__(self, f, dialect=csv.excel, encoding="utf-8", **kwds):
+        # Redirect output to a queue
+        self.queue = cStringIO.StringIO()
+        self.writer = csv.writer(self.queue, dialect=dialect, **kwds)
+        self.stream = f
+        self.encoder = codecs.getincrementalencoder(encoding)()
+
+    def writerow(self, row):
+        self.writer.writerow([s.encode("utf-8") for s in row])
+        # Fetch UTF-8 output from the queue ...
+        data = self.queue.getvalue()
+        data = data.decode("utf-8")
+        # ... and reencode it into the target encoding
+        # data = self.encoder.encode(data)
+        # write to the target stream
+        self.stream.write(data)
+        # empty queue
+        self.queue.truncate(0)
+
+    def writerows(self, rows):
+        """
+        rows:
+        """
+        for row in rows:
+            self.writerow(row)
+
 IMPORTANT_FIELDS = [u"Datum", u"Name", u"Status", u"Art", u"Von", u"An", "uWährung", u"Brutto", u"Gebühr", u"Netto", u"Guthaben", u"Transaktionscode", u"Txn-Referenzkennung"] 
 
 class Txn:
@@ -179,7 +213,7 @@ class Txn:
     
     def findEmail(self):
 #        _cmd = "mdfind -interpret '%s' | grep IMAP | head -1" % self.id
-        _cmd = "/usr/local/bin/sense -n 0.8 mdfind -literal \"kMDItemTextContent = *%s && kMDItemContentType=com.apple.mail.elmx \"" % self.id
+        _cmd = "/usr/local/bin/sense -n 0.8 'mdfind -literal \"kMDItemTextContent = *%s && kMDItemContentType=com.apple.mail.elmx \"'" % self.id
         print _cmd
         _file = commands.getstatusoutput(_cmd)[1]
         if _file != '':
@@ -246,8 +280,13 @@ class Auszug:
     
     
     def printCSV(self, path):
-        writer = csv.writer(codecs.open(path, 'w', 'utf-8'), delimiter=',', quotechar="\"")
-        writer.writerow([u"Datum", u"Name", u"Brutto", "Original", "Gebuehr", "Kontostand", "Notes"])
+        """
+        Foobar
+        """
+        f = codecs.open(path, 'w', 'utf-8')
+        writer = UnicodeWriter(f)
+        #        writer = csv.writer(codecs.open(path, 'w', 'utf-8'), delimiter=',', quotechar="\"")
+        writer.writerow([u"Datum", u"Name", u"Brutto", u"Original", u"Gebühr", u"Kontostand", u"Notes"])
         for txn in self.sortedTxns():
             if txn.isPayment():
                 row = txn.toCSV()
@@ -255,7 +294,12 @@ class Auszug:
                     writer.writerow([row[x] for x in ["date", "name", "brutto", "original", "gebuehr", "guthaben", "notes"]])
 
 auszug = Auszug.readCSV("/Users/manuel/Downloads/Herunterladen.csv")
-txn = auszug.sortedTxns()[0]
+auszug.printCSV("/tmp/out.csv")
+print "printed CSV out to /tmp/out.csv\n"
+for txn in auszug.sortedTxns():
+    email = txn.findEmail()
+    emails = txn.findSimilarEmails()
+    print "%s: %s, %s\n" % (txn.id, email, emails)
 
 def openSpotlight(query):
     applescript = '''on run argv # we expect program arguments
