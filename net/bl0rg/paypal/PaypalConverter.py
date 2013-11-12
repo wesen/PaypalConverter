@@ -81,7 +81,11 @@ class Txn:
             return re.sub("[,.]", price_repl, str)
         
         def conv_waehrung(waehrung):
-            WAEHRUNG = {"USD": u"$", "EUR": u"\u20ac", "GBP": u"\u00a3"}
+            WAEHRUNG = {
+                "USD": u"USD"
+            #    "EUR": u"\u20ac",
+            #    "GBP": u"\u00a3"
+            }
             if WAEHRUNG.has_key(waehrung):
                 return WAEHRUNG[waehrung]
             else:
@@ -107,7 +111,7 @@ class Txn:
         return self.auszug.getReferringTxns(self.id)
     
     def __repr__(self):
-        return "<Txn: %s (%s - \"%s\") \"%s\" %s %s - %s>" % (self.getTypeCharacter(), self.id, self.art, self.name, self.waehrung, self.brutto, self.description)
+        return (u"<Txn: %s (%s - \"%s\") - %s - \"%s\" %s %s - %s>" % (self.getTypeCharacter(), self.id, self.art, time.strftime(u"%d.%m.%Y", self.date), self.name, self.waehrung, self.brutto, self.description)).encode('ascii', 'ignore')
 
     def getTypeCharacter(self):
         if self.isPaypalTxn():
@@ -121,21 +125,25 @@ class Txn:
         else:
             return "E"
         
-    def getCurrencyConversion(self):
+    def getCurrencyConversion(self, destWaehrung):
         conversions = [ x for x in self.getReferrers() if x.isConversion() ]
-        _from = [ x for x in conversions if x.waehrung != "$" ]
-        _to = [ x for x in conversions if x.waehrung == "$" ]
+        _from = [ x for x in conversions if x.waehrung != destWaehrung ]
+        _to = [ x for x in conversions if x.waehrung == destWaehrung ]
         if _from and _to:
             return (_from[0], _to[0])
         else:
             return (None, None)
         
     def convertCurrency(self):
-        (_from, _to) = self.getCurrencyConversion()
+        (_from, _to) = self.getCurrencyConversion("USD")
+        waehrung = "USD"
+        if not _to:
+            waehrung = "EUR"
+            (_from, _to) = self.getCurrencyConversion("EUR")
         if _to:
             self.real_brutto = "%s %s" % (self.waehrung, self.brutto)
             self.brutto = _to.brutto
-            self.currency = u"$"
+            self.waehrung = waehrung
             self.guthaben = _to.guthaben
         
     def getUSDValue(self):
@@ -143,10 +151,10 @@ class Txn:
         if _to:
             return _to.brutto
         else:
-            return u"0.00" 
+            return None
         
     def needsConversion(self):
-        return self.waehrung != "$"
+        return self.waehrung != "USD"
     
     def isPaypalTxn(self):
         return self.name == u"PayPal"
@@ -164,30 +172,30 @@ class Txn:
         return (not self.isPaypalTxn()) and (not self.isAuthorization()) and (not self.isConversion())
     
     def isPrivate(self):
-        regexps = ["ZERO INCH", "Boomkat", "Bleep", "buyolympia"]
+        regexps = ["ZERO INCH", "Boomkat", "Bleep", "buyolympia", "Spotify"]
         for _re in regexps:
             if re.match(_re, self.name):
                 return True
         return False
+
+    def getMonth(self):
+        return self.date.tm_mon
+
+    def getYear(self):
+        return self.date.tm_year
+
     
     def toCSV(self):
         row = {}
-        if self.needsConversion():
-            amount = self.getUSDValue()
-        else:
-            amount = self.brutto
         row["date"] = time.strftime("%d.%m.%Y", self.date)
         row["name"] = self.name
         row["original"] = self.real_brutto
-        if amount != "0.00":
-            row["brutto"] = u"$%s" % amount
-        else:
-            row["brutto"] = u""
+        row["brutto"] = u"%s %s" % (self.waehrung, self.brutto)
         if self.gebuehr != u"0.00":
-            row["gebuehr"] = u"$%s" % self.gebuehr
+            row["gebuehr"] = u"%s %s" % (self.waehrung, self.gebuehr)
         else:
             row["gebuehr"] = u""
-        row["guthaben"] = u"$%s" % self.guthaben
+        row["guthaben"] = u"%s %s" % (self.waehrung, self.guthaben)
         row["notes"] = u""
         if self.isPrivate():
             row["notes"] += u"PRIVAT"
@@ -364,6 +372,7 @@ class Auszug:
         reader = unicode_csv_reader(codecs.open(path, 'r', 'iso-8859-1'), delimiter=',', quotechar="\"")
         header = [ x.strip() for x in reader.next() ]
         for row in [Txn(auszug, dict([(field, value) for field, value in zip(header, row)])) for row in reader]:
+            # print row.__repr__().encode('ascii', 'ignore')
             auszug.addTxn(row)
         auszug.convertCurrency()
         return auszug
@@ -380,14 +389,32 @@ class Auszug:
         """
         Foobar
         """
-        f = codecs.open(path, 'w', 'utf-8')
-        writer = UnicodeWriter(f)
-        #        writer = csv.writer(codecs.open(path, 'w', 'utf-8'), delimiter=',', quotechar="\"")
-        writer.writerow([u"Datum", u"Name", u"Brutto", u"Original", u"Gebühr", u"Kontostand", u"Notes"])
+        start_month = None
+        start_year = None
+        newFile = True
+        writer = None
+        f = None
         for txn in self.sortedTxns():
             if txn.isPayment():
                 row = txn.toCSV()
+                print row
                 if row["brutto"] != "":
+                    if txn.getYear() != start_year:
+                        start_year = txn.getYear()
+                        newFile = True
+                    if txn.getMonth() != start_month:
+                        start_month = txn.getMonth()
+                        newFile = True
+                    if newFile:
+                        newFile = False
+                        if f:
+                            f.close()
+                            f = None
+                        f = codecs.open("%s-%.4d-%.2d.csv" % (path, start_year, start_month), 'w', 'utf-8')
+                        writer = UnicodeWriter(f)
+                        #        writer = csv.writer(codecs.open(path, 'w', 'utf-8'), delimiter=',', quotechar="\"")
+                        writer.writerow([u"Datum", u"Name", u"Brutto", u"Original", u"Gebühr", u"Kontostand", u"Notes"])
+
                     writer.writerow([row[x] for x in ["date", "name", "brutto", "original", "gebuehr", "guthaben", "notes"]])
 
 def intTryParse(value):
@@ -402,7 +429,8 @@ class PaypalConsole(cmd.Cmd):
         self.prompt = "paypal> "
         self.intro = "Welcome to the Paypal Converter"
         self.auszug = None
-        self.do_csv("~/Downloads/Herunterladen.csv")
+        # self.do_csv("/tmp/test.csv")
+        # self.do_list(None)
         readline.set_completer_delims(' \t\n`@#$%^&*()-=+[{]}\\|;:\'",<>?')
 
     def do_csv(self, name):
@@ -423,12 +451,20 @@ class PaypalConsole(cmd.Cmd):
             traceback.print_exc(file=sys.stdout)
             print "error while writing csv"
 
+    def do_list(self, args):
+        for txn in self.auszug.sortedTxns():
+            print txn.__repr__().encode('ascii', 'ignore')
+
     def do_emails(self, args):
         if not self.auszug:
             print "please first parse a csv"
             return
         try:
             for txn in self.auszug.sortedTxns():
+                if not txn.isPayment():
+                    continue
+                if txn.isPrivate():
+                    continue
                 if txn.isConversion() or txn.isAuthorization():
                     continue
                 if txn.name in ["Kreditkarte", "Bankkonto (Lastschrift)"]:
@@ -443,10 +479,14 @@ class PaypalConsole(cmd.Cmd):
                     if info:
                         print "%s) %s" % (i, info)
                 if len(emails) > 0:
-                    _open = raw_input("Open email: ")
-                    idx = intTryParse(_open)
-                    if idx is not None and 0 < idx <= len(emails):
-                        commands.getstatusoutput("open \"%s\"" % emails[idx - 1])
+                    stop = False
+                    while not stop:
+                        _open = raw_input("Open email: ")
+                        idx = intTryParse(_open)
+                        if idx is not None and 0 < idx <= len(emails):
+                            commands.getstatusoutput("open \"%s\"" % emails[idx - 1])
+                        elif _open == "":
+                            stop = True
                 print "\n"
         except Exception as e:
             print "error while searching for emails"
